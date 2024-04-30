@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from transformers import AutoConfig, AutoModelForCausalLM, \
                          LlamaConfig, LlamaModel, LlamaForCausalLM
@@ -46,6 +47,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         self.model = LlavaLlamaModel(config)
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
+        self.alpha_token_idx = None  # set in LlavaMetaForCausalLM.initialize_alpha_tokenizer()
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
@@ -70,36 +72,128 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
-        if inputs_embeds is None:
+        if self.model.config.alpha:
+            input_ids_backup = input_ids
+            position_ids_backup = position_ids
+            attention_mask_backup = attention_mask
+            past_key_values_backup = past_key_values
+            labels_backup = labels
             (
                 input_ids,
-                position_ids,
+                position_ids,  # None
                 attention_mask,
-                past_key_values,
+                past_key_values,  # None
                 inputs_embeds,
-                labels
-            ) = self.prepare_inputs_labels_for_multimodal(
-                input_ids,
-                position_ids,
-                attention_mask,
-                past_key_values,
                 labels,
-                images,
-                image_sizes
+                alpha_token_mask,  # (batch_size, seq_len)
+                image_embeds,  # (batch_size, patch_size, patch_size, hidden_size)
+            ) = self.prepare_inputs_labels_for_multimodal_alpha(
+                input_ids,  # given
+                position_ids,
+                attention_mask,  # given
+                past_key_values,
+                labels,  # given
+                images,  # given
+                image_sizes,
+                None
+            )
+            output = super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=True,
+                return_dict=return_dict
+            )
+            last_hidden_state = output.hidden_states[-1]  # (batch_size, seq_len, hidden_size)
+            alpha_hidden_states = last_hidden_state[alpha_token_mask]  # (num_alpha, hidden_size)
+            alpha_projections = self.get_model().state_projector(alpha_hidden_states)  # (num_alpha, projection_size)
+
+            assert alpha_projections.size(0) == alpha_token_mask.sum() == len(images), \
+                f"alpha_projections.size={alpha_projections.size}, " \
+                f"alpha_token_mask.sum()={alpha_token_mask.sum()}, " \
+                f"len(images)={len(images)}"
+
+            (sparse_embeddings, dense_embeddings) = self.get_model().prompt_encoder(points=None,
+                                                                                    boxes=None,
+                                                                                    masks=None,
+                                                                                    text_embeds=alpha_projections.unsqueeze(1))
+            sparse_embeddings = sparse_embeddings.to(alpha_projections.dtype)
+
+            low_res_masks, _ = self.get_model().alpha_decoder(image_embeddings=self.get_model().out_projector(image_embeds).permute(0, 3, 1, 2),  # (bs, 256, 16, 16)
+                                                              image_pe=self.get_model().prompt_encoder.get_dense_pe(),  # (1, 256, 16, 16)
+                                                              sparse_prompt_embeddings=sparse_embeddings,  # (bs, 1, 256)
+                                                              dense_prompt_embeddings=dense_embeddings,  # (bs, 256, 16, 16)
+                                                              multimask_output=False)  # (bs, 4, 64, 64), (bs, 4)
+            alpha_mask = F.interpolate(low_res_masks, self.get_model().prompt_encoder.input_image_size, mode='bilinear', align_corners=False)[:, [0], :, :]  # (bs, 1, 224, 224)
+
+            (
+                input_ids,
+                position_ids,  # None
+                attention_mask,
+                past_key_values,  # None
+                inputs_embeds,
+                labels,
+                alpha_token_mask,  # (batch_size, seq_len)
+                image_embeds,  # (batch_size, patch_size, patch_size, hidden_size)
+            ) = self.prepare_inputs_labels_for_multimodal_alpha(
+                input_ids_backup,  # given
+                position_ids_backup,
+                attention_mask_backup,  # given
+                past_key_values_backup,
+                labels_backup,  # given
+                images,  # given
+                image_sizes,
+                alpha_mask
+            )
+            return super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict
             )
 
-        return super().forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            labels=labels,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict
-        )
+        else:
+            if inputs_embeds is None:
+                (
+                    input_ids,
+                    position_ids,  # None
+                    attention_mask,
+                    past_key_values,  # None
+                    inputs_embeds,
+                    labels
+                ) = self.prepare_inputs_labels_for_multimodal(
+                    input_ids,  # given
+                    position_ids,
+                    attention_mask,  # given
+                    past_key_values,
+                    labels,  # given
+                    images,  # given
+                    image_sizes
+                )
+
+            return super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict
+            )
 
     @torch.no_grad()
     def generate(

@@ -12,6 +12,7 @@ class SeparatorStyle(Enum):
     TWO = auto()
     MPT = auto()
     PLAIN = auto()
+    ALPHA_PLAIN = auto()
     LLAMA_2 = auto()
 
 
@@ -52,7 +53,7 @@ class Conversation:
                 else:
                     ret += role + ":"
         elif self.sep_style == SeparatorStyle.TWO:
-            seps = [self.sep, self.sep2]
+            seps = [self.sep, self.sep2]  # [" ", "</s>"]
             ret = self.system + seps[0]
             for i, (role, message) in enumerate(messages):
                 if message:
@@ -298,6 +299,16 @@ conv_llava_plain = Conversation(
     sep="\n",
 )
 
+conv_llava_alpha_plain = Conversation(
+    system="",
+    roles=("", ""),
+    messages=(
+    ),
+    offset=0,
+    sep_style=SeparatorStyle.ALPHA_PLAIN,
+    sep="\n",
+)
+
 conv_llava_v0 = Conversation(
     system="A chat between a curious human and an artificial intelligence assistant. "
            "The assistant gives helpful, detailed, and polite answers to the human's questions.",
@@ -389,6 +400,7 @@ conv_templates = {
     "llava_llama_2": conv_llava_llama_2,
 
     "mpt": conv_mpt,
+    "alpha_plain": conv_llava_alpha_plain,
 }
 
 

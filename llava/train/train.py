@@ -27,7 +27,7 @@ import torch
 import transformers
 import tokenizers
 
-from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_ALPHA_TOKEN
 from torch.utils.data import Dataset
 from llava.train.llava_trainer import LLaVATrainer
 
@@ -64,6 +64,9 @@ class ModelArguments:
     mm_use_im_patch_token: bool = field(default=True)
     mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
+    alpha: bool = field(default=False)
+    alpha_clip_weight_path: Optional[str] = field(default=None)
+    tune_alpha_decoder: bool = field(default=False)
 
 
 @dataclass
@@ -109,6 +112,7 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_weight_path: str = ""
     lora_bias: str = "none"
     mm_projector_lr: Optional[float] = None
+    alpha_decoder_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
 
 
@@ -315,14 +319,16 @@ def preprocess_multimodal(
 
     for source in sources:
         for sentence in source:
-            if DEFAULT_IMAGE_TOKEN in sentence['value']:
+            if DEFAULT_IMAGE_TOKEN in sentence['value']:  # <image>
+                # Add <image>\n at the beginning of the conversation
                 sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '').strip()
                 sentence['value'] = DEFAULT_IMAGE_TOKEN + '\n' + sentence['value']
                 sentence['value'] = sentence['value'].strip()
-                if "mmtag" in conversation_lib.default_conversation.version:
+                if "mmtag" in conversation_lib.default_conversation.version:  # "mmtag" not in version (version == 'v1')
                     sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '<Image>' + DEFAULT_IMAGE_TOKEN + '</Image>')
             replace_token = DEFAULT_IMAGE_TOKEN
-            if data_args.mm_use_im_start_end:
+            if data_args.mm_use_im_start_end:  # False
+                # replace_token = <im_start><image><im_end>
                 replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
             sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
 
@@ -416,6 +422,10 @@ def preprocess_v1(
     tokenizer: transformers.PreTrainedTokenizer,
     has_image: bool = False
 ) -> Dict:
+    """
+    Gather system prompt, roles, and values from conversations and tokenize it.
+    Generate mask targets, where human words are masked with IGNORE_INDEX.
+    """
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -431,7 +441,7 @@ def preprocess_v1(
             role = roles[sentence["from"]]
             assert role == conv.roles[j % 2], f"{i}"
             conv.append_message(role, sentence["value"])
-        conversations.append(conv.get_prompt())
+        conversations.append(conv.get_prompt())  # ["system prompt USER: instruction\n ASSISTANT: response </s> USER: ..."]
 
     # Tokenize conversations
 
@@ -451,18 +461,18 @@ def preprocess_v1(
     assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
 
     # Mask targets
-    sep = conv.sep + conv.roles[1] + ": "
+    sep = conv.sep + conv.roles[1] + ": "  # " ASSISTANT: "
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
-        rounds = conversation.split(conv.sep2)
+        rounds = conversation.split(conv.sep2)  # </s>
         cur_len = 1
-        target[:cur_len] = IGNORE_INDEX
+        target[:cur_len] = IGNORE_INDEX  # BOS token
         for i, rou in enumerate(rounds):
             if rou == "":
                 break
 
-            parts = rou.split(sep)
+            parts = rou.split(sep)  # " ASSISTANT: "
             if len(parts) != 2:
                 break
             parts[0] += sep
@@ -594,9 +604,31 @@ def preprocess_plain(
     for source in sources:
         assert len(source) == 2
         assert DEFAULT_IMAGE_TOKEN in source[0]['value']
-        source[0]['value'] = DEFAULT_IMAGE_TOKEN
+        source[0]['value'] = DEFAULT_IMAGE_TOKEN  # replace the user instruction with only "<image>"
         conversation = source[0]['value'] + source[1]['value'] + conversation_lib.default_conversation.sep
-        conversations.append(conversation)
+        conversations.append(conversation)  # <image>response\n
+    # tokenize conversations
+    input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations]
+    targets = copy.deepcopy(input_ids)
+    for target, source in zip(targets, sources):
+        tokenized_len = len(tokenizer_image_token(source[0]['value'], tokenizer))
+        target[:tokenized_len] = IGNORE_INDEX
+
+    return dict(input_ids=input_ids, labels=targets)
+
+
+def preprocess_alpha_plain(
+    sources: Sequence[str],
+    tokenizer: transformers.PreTrainedTokenizer,
+) -> Dict:
+    # add end signal and concatenate together
+    conversations = []
+    for source in sources:
+        assert len(source) == 2
+        assert DEFAULT_IMAGE_TOKEN in source[0]['value']
+        source[0]['value'] = DEFAULT_IMAGE_TOKEN + DEFAULT_ALPHA_TOKEN  # replace the user instruction with "<image><alpha>"
+        conversation = source[0]['value'] + source[1]['value'] + conversation_lib.default_conversation.sep
+        conversations.append(conversation)  # <image><alpha>response\n
     # tokenize conversations
     input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations]
     targets = copy.deepcopy(input_ids)
@@ -610,7 +642,7 @@ def preprocess_plain(
 def preprocess(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+    has_image: bool = False,
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -621,6 +653,8 @@ def preprocess(
     """
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.PLAIN:
         return preprocess_plain(sources, tokenizer)
+    if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.ALPHA_PLAIN:
+        return preprocess_alpha_plain(sources, tokenizer)
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version.startswith("v1"):
@@ -718,7 +752,7 @@ class LazySupervisedDataset(Dataset):
                 image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
-                self.data_args)
+                self.data_args)  # move <image>\n to the beginning
         else:
             sources = copy.deepcopy([e["conversations"] for e in sources])
         data_dict = preprocess(
@@ -804,7 +838,7 @@ def train(attn_implementation=None):
             quantization_config=BitsAndBytesConfig(
                 load_in_4bit=training_args.bits == 4,
                 load_in_8bit=training_args.bits == 8,
-                llm_int8_skip_modules=["mm_projector"],
+                llm_int8_skip_modules=["mm_projector", "state_projector", "out_projector", "prompt_encoder", "alpha_decoder"],
                 llm_int8_threshold=6.0,
                 llm_int8_has_fp16_weight=False,
                 bnb_4bit_compute_dtype=compute_dtype,
@@ -902,8 +936,8 @@ def train(attn_implementation=None):
         tokenizer.pad_token = tokenizer.unk_token
     else:
         tokenizer.pad_token = tokenizer.unk_token
-        if model_args.version in conversation_lib.conv_templates:
-            conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
+        if model_args.version in conversation_lib.conv_templates:  # "alpha_plain"
+            conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]  # conv_llava_alpha_plain
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
@@ -934,14 +968,35 @@ def train(attn_implementation=None):
             for p in model.get_model().mm_projector.parameters():
                 p.requires_grad = False
 
+        model.config.tune_alpha_decoder = training_args.tune_alpha_decoder = model_args.tune_alpha_decoder
+        if model_args.tune_alpha_decoder and model_args.alpha:
+            for p in model.get_model().state_projector.parameters():
+                p.requires_grad = True
+            for p in model.get_model().out_projector.parameters():
+                p.requires_grad = True
+            for p in model.get_model().prompt_encoder.parameters():
+                p.requires_grad = True
+            for p in model.get_model().alpha_decoder.parameters():
+                p.requires_grad = True
+
         if training_args.bits in [4, 8]:
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
+            if model_args.tune_alpha_decoder and model_args.alpha:
+                model.get_model().state_projector.to(dtype=compute_dtype, device=training_args.device)
+                model.get_model().out_projector.to(dtype=compute_dtype, device=training_args.device)
+                model.get_model().prompt_encoder.to(dtype=compute_dtype, device=training_args.device)
+                model.get_model().alpha_decoder.to(dtype=compute_dtype, device=training_args.device)
 
         model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_projector_lr = training_args.mm_projector_lr
+        model.config.state_projector_lr = training_args.alpha_decoder_lr
+        model.config.out_projector_lr = training_args.alpha_decoder_lr
+        model.config.prompt_encoder_lr = training_args.alpha_decoder_lr
+        model.config.alpha_decoder_lr = training_args.alpha_decoder_lr
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
+        model.initialize_alpha_tokenizer(model_args, tokenizer=tokenizer)  # add <alpha> token and save its idx in config
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
@@ -961,7 +1016,7 @@ def train(attn_implementation=None):
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
-                    **data_module)
+                    **data_module)  # train_dataset, eval_dataset (None), data_collator
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

@@ -309,7 +309,7 @@ Our base model Vicuna v1.5, which is an instruction-tuned chatbot, will be downl
 
 ### Pretrain (feature alignment)
 
-Please download the 558K subset of the LAION-CC-SBU dataset with BLIP captions we use in the paper [here](https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain).
+Please download the 558K subset of the LAION-CC-SBU dataset with BLIP captions we use in the paper [here](https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain).  27G
 
 Pretrain takes around 5.5 hours for LLaVA-v1.5-13B on 8x A100 (80G), due to the increased resolution to 336px. It takes around 3.5 hours for LLaVA-v1.5-7B.
 
@@ -332,11 +332,11 @@ Tips:
 
 Please download the annotation of the final mixture our instruction tuning data [llava_v1_5_mix665k.json](https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K/blob/main/llava_v1_5_mix665k.json), and download the images from constituting datasets:
 
-- COCO: [train2017](http://images.cocodataset.org/zips/train2017.zip)
-- GQA: [images](https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip)
+- COCO: [train2017](http://images.cocodataset.org/zips/train2017.zip) 18G
+- GQA: [images](https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip)  20G
 - OCR-VQA: [download script](https://drive.google.com/drive/folders/1_GYPY5UkUy7HIcR0zq3ZCFgeZN7BAfm_?usp=sharing), **we save all files as `.jpg`**
-- TextVQA: [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)
-- VisualGenome: [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)
+- TextVQA: [train_val_images](https://dl.fbaipublicfiles.com/textvqa/images/train_val_images.zip)  6.6G
+- VisualGenome: [part1](https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip), [part2](https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip)  9.1G 5.1G
 
 After downloading all of them, organize the data as follows in `./playground/data`,
 
