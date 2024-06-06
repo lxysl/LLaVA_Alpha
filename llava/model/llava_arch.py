@@ -553,7 +553,7 @@ class LlavaMetaForCausalLM(ABC):
                                                  int(np.sqrt(image_features.shape[1])),
                                                  image_features.shape[2]))
 
-        return input_ids, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, alpha_token_mask, image_features
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, alpha_token_mask, image_features
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:
