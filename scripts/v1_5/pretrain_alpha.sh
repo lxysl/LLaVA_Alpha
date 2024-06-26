@@ -8,7 +8,7 @@ deepspeed --include localhost:0,1,2,3,4 --master_port 29600 llava/train/train_me
     --image_folder ./LLaVA-Pretrain/images \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --alpha True \
-    --alpha_clip_weight_path ./checkpoints/clip_l14_336_grit_20m_4xe.pth \
+    --alpha_clip_weight_path ./checkpoints/alpha_clip_l14_336_grit_20m_4xe \
     --tune_alpha_decoder True \
     --mm_projector_type mlp2x_gelu \
     --tune_mm_mlp_adapter True \

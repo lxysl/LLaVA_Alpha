@@ -61,6 +61,7 @@ class ModelArguments:
     vision_tower: Optional[str] = field(default=None)
     mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
+    pretrain_alpha_decoder: Optional[str] = field(default=None)
     mm_projector_type: Optional[str] = field(default='linear')
     mm_use_im_start_end: bool = field(default=False)
     mm_use_im_patch_token: bool = field(default=True)
@@ -210,6 +211,26 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                 torch.save(weight_to_save, os.path.join(mm_projector_folder, f'{current_folder}.bin'))
             else:
                 torch.save(weight_to_save, os.path.join(output_dir, f'mm_projector.bin'))
+
+    if getattr(trainer.args, 'tune_alpha_decoder', False):
+        # Only save Decoder
+        keys_to_match = ['state_projector', 'out_projector', 'prompt_encoder', 'alpha_decoder']
+        if getattr(trainer.args, "use_im_start_end", False):
+            keys_to_match.extend(['embed_tokens', 'embed_in'])
+
+        weight_to_save = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
+
+        current_folder = output_dir.split('/')[-1]
+        parent_folder = os.path.dirname(output_dir)
+        if trainer.args.local_rank == 0 or trainer.args.local_rank == -1:
+            if current_folder.startswith('checkpoint-'):
+                alpha_decoder_folder = os.path.join(parent_folder, "alpha_decoder")
+                os.makedirs(alpha_decoder_folder, exist_ok=True)
+                torch.save(weight_to_save, os.path.join(alpha_decoder_folder, f'{current_folder}.bin'))
+            else:
+                torch.save(weight_to_save, os.path.join(output_dir, f'alpha_decoder.bin'))
+
+    if getattr(trainer.args, "tune_mm_mlp_adapter", False) or getattr(trainer.args, 'tune_alpha_decoder', False):
         return
 
     if trainer.deepspeed:
@@ -528,11 +549,17 @@ def preprocess_alpha_v1(
             # Skip the first one if it is not from human
             source = source[1:]
 
+        has_image_token = False
         conv.messages = []
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
             assert role == conv.roles[j % 2], f"{i}"
-            conv.append_message(role, sentence["value"] + DEFAULT_ALPHA_TOKEN if DEFAULT_IMAGE_TOKEN in sentence["value"] else sentence["value"])
+            if DEFAULT_IMAGE_TOKEN in sentence["value"]:
+                has_image_token = True
+            if j % 2 == 0 and has_image_token:  # 'from' == 'human' and <image> appeared
+                conv.append_message(role, sentence["value"] + DEFAULT_ALPHA_TOKEN)
+            else:
+                conv.append_message(role, sentence["value"])
         # ["system prompt USER: instruction\n<alpha> ASSISTANT: response </s> USER: ..."] (if <image> in user instruction)
         conversations.append(conv.get_prompt())
 
@@ -1108,6 +1135,7 @@ def train(attn_implementation=None):
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
+    # training_args.save_steps = 8300
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,

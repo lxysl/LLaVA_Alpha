@@ -26,6 +26,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput
 
 from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
+from ...constants import IMAGE_TOKEN_INDEX
 
 
 class LlavaConfig(LlamaConfig):
@@ -72,7 +73,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
-        if self.model.config.alpha:
+        if self.model.config.alpha and (input_ids == IMAGE_TOKEN_INDEX).sum().item() != 0:
             input_ids_backup = input_ids
             position_ids_backup = position_ids
             attention_mask_backup = attention_mask
@@ -109,27 +110,43 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 output_hidden_states=True,
                 return_dict=return_dict
             )
+
+            # if there is no ALPHA token (no <image>) in the conversation, return the output
+            # if alpha_token_mask.sum() == 0:
+            #     return output
+
             last_hidden_state = output.hidden_states[-1]  # (batch_size, seq_len, hidden_size)
             alpha_hidden_states = last_hidden_state[alpha_token_mask]  # (num_alpha, hidden_size)
             alpha_projections = self.get_model().state_projector(alpha_hidden_states)  # (num_alpha, projection_size)
 
-            assert alpha_projections.size(0) == alpha_token_mask.sum() == len(images), \
-                f"alpha_projections.size={alpha_projections.size}, " \
-                f"alpha_token_mask.sum()={alpha_token_mask.sum()}, " \
-                f"len(images)={len(images)}"
+            alpha_token_counts = alpha_token_mask.int().sum(-1)  # (batch_size)
+            alpha_token_offset = torch.cat([torch.zeros(1, device=alpha_token_counts.device).long(), alpha_token_counts.cumsum(-1)])  # (batch_size + 1)
 
-            (sparse_embeddings, dense_embeddings) = self.get_model().prompt_encoder(points=None,
-                                                                                    boxes=None,
-                                                                                    masks=None,
-                                                                                    text_embeds=alpha_projections.unsqueeze(1))
-            sparse_embeddings = sparse_embeddings.to(alpha_projections.dtype)
+            alpha_projections_ = []                                                                       
+            for i in range(len(alpha_token_offset) - 1):
+                start_i, end_i = alpha_token_offset[i], alpha_token_offset[i + 1]
+                alpha_projections_.append(alpha_projections[start_i:end_i])
+            alpha_projections = alpha_projections_  # len(alpha_projections) == batch_size
 
-            low_res_masks, _ = self.get_model().alpha_decoder(image_embeddings=self.get_model().out_projector(image_embeds).permute(0, 3, 1, 2),  # (bs, 256, 16, 16)
-                                                              image_pe=self.get_model().prompt_encoder.get_dense_pe(),  # (1, 256, 16, 16)
-                                                              sparse_prompt_embeddings=sparse_embeddings,  # (bs, 1, 256)
-                                                              dense_prompt_embeddings=dense_embeddings,  # (bs, 256, 16, 16)
-                                                              multimask_output=False)  # (bs, 4, 64, 64), (bs, 4)
-            alpha_mask = F.interpolate(low_res_masks, self.get_model().prompt_encoder.input_image_size, mode='bilinear', align_corners=False)[:, [0], :, :]  # (bs, 1, 224, 224)
+            # len(images) always equals to the batch_size
+            # the position where alpha_token_counts equals to 0 means this image is a zero tensor (train.py:893)
+
+            alpha_masks = torch.ones_like(images[:, [0], :, :])
+            for i in range(len(alpha_token_counts)):
+                if alpha_token_counts[i] != 0:
+                    (sparse_embeddings, dense_embeddings) = self.get_model().prompt_encoder(points=None,
+                                                                                            boxes=None,
+                                                                                            masks=None,
+                                                                                            text_embeds=alpha_projections[i].unsqueeze(1))  # (num_alpha_per_sample, 1, projection_size)
+                    sparse_embeddings = sparse_embeddings.to(alpha_projections[i].dtype)
+                    
+                    low_res_masks, _ = self.get_model().alpha_decoder(image_embeddings=self.get_model().out_projector(image_embeds[i]).permute(2, 0, 1).repeat(sparse_embeddings.size(0), 1, 1, 1),  # (num_alpha_per_sample, 256, 16, 16)
+                                                                      image_pe=self.get_model().prompt_encoder.get_dense_pe().to(sparse_embeddings.device),  # (1, 256, 16, 16)
+                                                                      sparse_prompt_embeddings=sparse_embeddings,  # (num_alpha_per_sample, 1, 256)
+                                                                      dense_prompt_embeddings=dense_embeddings,  # (num_alpha_per_sample, 256, 16, 16)
+                                                                      multimask_output=False)  # -> (num_alpha_per_sample, 4, 64, 64), (num_alpha_per_sample, 4)
+                    alpha_masks_per_sample = F.interpolate(low_res_masks, self.get_model().prompt_encoder.input_image_size, mode='bilinear', align_corners=False)[:, [0], :, :]  # (num_alpha_per_sample, 1, 224, 224)
+                    alpha_masks[i] = (alpha_masks_per_sample.mean(0))  # (1, 224, 224)
 
             (
                 input_ids,
@@ -148,8 +165,43 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 labels_backup,  # given
                 images,  # given
                 image_sizes,
-                alpha_mask
+                alpha_masks
             )
+            return super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict
+            )
+
+        elif self.model.config.alpha:
+            if inputs_embeds is None:
+                (
+                    input_ids,
+                    position_ids,  # None
+                    attention_mask,
+                    past_key_values,  # None
+                    inputs_embeds,
+                    labels,
+                    _,
+                    _
+                ) = self.prepare_inputs_labels_for_multimodal_alpha(
+                    input_ids,  # given
+                    position_ids,
+                    attention_mask,  # given
+                    past_key_values,
+                    labels,  # given
+                    images,  # given
+                    image_sizes,
+                    None
+                )
+
             return super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,

@@ -278,6 +278,21 @@ class LLaVATrainer(Trainer):
         if not getattr(self.args, 'tune_mm_mlp_adapter', False) and not getattr(self.args, 'tune_alpha_decoder', False):
             super(LLaVATrainer, self)._save_checkpoint(model, trial, metrics)
 
+        # output_dir = self.args.output_dir
+        # if self.deepspeed:
+        #     torch.cuda.synchronize()
+        #     self.save_model(output_dir)
+        #     return
+
+        # state_dict = self.model.state_dict()
+        # if self.args.should_save:
+        #     cpu_state_dict = {
+        #         key: value.cpu()
+        #         for key, value in state_dict.items()
+        #     }
+        #     del state_dict
+        #     self._save(output_dir, state_dict=cpu_state_dict)  # noqa
+
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass

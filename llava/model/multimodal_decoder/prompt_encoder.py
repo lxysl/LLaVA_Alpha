@@ -199,6 +199,7 @@ class PositionEmbeddingRandom(nn.Module):
             "positional_encoding_gaussian_matrix",
             scale * torch.randn((2, num_pos_feats)),  # 2 x 128
         )
+        self.positional_encoding_gaussian_matrix.cuda()
 
     def _pe_encoding(self, coords: torch.Tensor) -> torch.Tensor:
         """Positionally encode points that are normalized to [0,1]."""

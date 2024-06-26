@@ -22,6 +22,9 @@ deepspeed llava/train/train_mem.py \
     --image_folder ./playground/data/coco/train2017 \
     --vision_tower openai/clip-vit-large-patch14 \
     --pretrain_mm_mlp_adapter ./checkpoints/llava-alpha-$MODEL_VERSION-pretrain/mm_projector.bin \
+    --alpha True \
+    --alpha_clip_weight_path ./checkpoints/alpha_clip_l14_grit+mim_fultune_6xe.pth \
+    --tune_alpha_decoder True \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
     --mm_use_im_patch_token False \

@@ -20,7 +20,7 @@ deepspeed llava/train/train_mem.py \
     --image_folder /path/to/images \
     --vision_tower openai/clip-vit-large-patch14 \
     --alpha True \
-    --alpha_clip_weight_path ./checkpoints/clip_l14_grit+mim_fultune_6xe.pth \
+    --alpha_clip_weight_path ./checkpoints/alpha_clip_l14_grit+mim_fultune_6xe.pth \
     --tune_alpha_decoder True \
     --tune_mm_mlp_adapter True \
     --mm_vision_select_layer -2 \

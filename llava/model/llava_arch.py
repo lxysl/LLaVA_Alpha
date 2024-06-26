@@ -65,6 +65,7 @@ class LlavaMetaModel:
         mm_vision_select_layer = model_args.mm_vision_select_layer
         mm_vision_select_feature = model_args.mm_vision_select_feature
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
+        pretrain_alpha_decoder = model_args.pretrain_alpha_decoder
         mm_patch_merge_type = model_args.mm_patch_merge_type
         alpha = model_args.alpha
 
@@ -128,6 +129,15 @@ class LlavaMetaModel:
             self.prompt_encoder = build_prompt_encoder(self.config)
             self.alpha_decoder = build_alpha_decoder(self.config)
 
+        if pretrain_alpha_decoder is not None:
+            alpha_decoder_weights = torch.load(pretrain_alpha_decoder, map_location='cpu')
+            def get_w(weights, keyword):
+                return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
+            
+            self.state_projector.load_state_dict(get_w(alpha_decoder_weights, 'state_projector'))
+            self.out_projector.load_state_dict(get_w(alpha_decoder_weights, 'out_projector'))
+            self.prompt_encoder.load_state_dict(get_w(alpha_decoder_weights, 'prompt_encoder'), strict=False)
+            self.alpha_decoder.load_state_dict(get_w(alpha_decoder_weights, 'alpha_decoder'))
 
 def unpad_image(tensor, original_size):
     """
@@ -601,6 +611,7 @@ class LlavaMetaForCausalLM(ABC):
 
     def initialize_alpha_tokenizer(self, model_args, tokenizer):
         if model_args.alpha:
+            print('Using alpha token')
             tokenizer.add_tokens([DEFAULT_ALPHA_TOKEN], special_tokens=True)
             self.resize_token_embeddings(len(tokenizer))
             alpha_token_idx = tokenizer([DEFAULT_ALPHA_TOKEN], add_special_tokens=False).input_ids[0]
